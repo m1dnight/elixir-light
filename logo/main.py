@@ -1,325 +1,701 @@
 import pathlib
 
 import numpy as np
-from PIL import Image
-from PIL import ImageFilter
+import openstl
+from PIL import Image, ImageFilter, ImageOps
+from scipy import ndimage
 from stl import mesh
-import pymesh
-
-distinct_colors = 14
-max_width = 1024
-# layer_height = 0.2 # 0.49
-layer_height = 0.1 # 0.22
-transparent_layers = 5
 
 
+class ImageContainer:
+    def __init__(self, image=None, image_path=None):
+        self.image = image
+        self.image_path = image_path
 
-def resize_image(image, max_size):
-    # Get current dimensions
-    width, height = image.size
+    @classmethod
+    def from_image(cls, image_path):
+        """
+        Create an ImageContainer from an image file.
 
-    # Calculate the scaling factor
-    # We want the larger dimension to be max_size
-    if width > height:
-        # Width is the limiting dimension
-        new_width = max_size
-        new_height = int((height * max_size) / width)
-    else:
-        # Height is the limiting dimension
-        new_height = max_size
-        new_width = int((width * max_size) / height)
+        Args:
+            image_path: Path to the image file
 
-    # Resize the image
-    resized_img = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+        Returns:
+            ImageContainer instance with the image as a numpy array
+        """
+        image = Image.open(image_path)
+        return cls(image, image_path)
 
-    return resized_img
+    def debugprint(self):
+        """
+        Print out some debug information about the image.
+        """
+        # unique values in the image array
+        image_arr = np.array(self.image)
+        unique_colors = sorted(np.unique(image_arr))
+        print("unique colors: {}".format([int(x) for x in unique_colors]))
+        print("min pixel value: {}, max pixel value: {}".format(np.min(image_arr), np.max(image_arr)))
+        print("number of unique colors: {}".format(len(unique_colors)))
 
+    def process_logo(self, scale=3, colors=14, median_size=13, border_width=10, fill_holes=True):
+        """
+        Process the logo through all transformation steps.
 
-def remove_alpha(image):
-    new_image = Image.new("RGBA", image.size, "WHITE")
-    new_image.paste(image, (0, 0), image)
-    new_image.convert('RGB')
-    return new_image
+        Args:
+            max_width: Maximum width for resizing (default: 256)
+            max_height: Maximum height for resizing (default: 256)
+            colors: Number of colors to quantize to (default: 14)
+            median_size: Size of median filter kernel (default: 13)
+            border_width: Width of border in pixels (default: 10)
 
+        Returns:
+            self (for method chaining)
+        """
+        image =       (self.resize(scale=scale).remove_alpha().grayscale().quantize(colors=colors).add_border(
+            border_width=border_width).median_filter(size=median_size))
 
-def image_path(logo_path, suffix):
-    filename = pathlib.Path(logo_path).stem
-    no_alpha_filename = f"{filename}_{suffix}.png"
-    return pathlib.Path(logo_path).parent / no_alpha_filename
-
-
-def stl_path(logo_path, silhouette=False):
-    filename = pathlib.Path(logo_path).stem
-    stl_filename = f"{filename}.stl"
-    if silhouette:
-        stl_filename = f"{filename}_silhouette.stl"
-    return pathlib.Path(logo_path).parent / stl_filename
-
-
-def process_logo(logo_path):
-    image = Image.open(logo_path)
-    # resize image if necessary
-    image = resize_image(image, max_width)
-
-    # remove alpha if there is any
-    image = remove_alpha(image)
-    image.save(image_path(logo_path, "no_alpha"))
-
-    # grayscale the image
-    image = image.convert("L")
-    image.save(image_path(logo_path, "grayscale"))
-
-    # quantize the image
-    image = image.quantize(distinct_colors)
-    image.save(image_path(logo_path, "quantized"))
-
-    # median filter to remove details
-    image = image.convert("RGB")
-    image = image.filter(ImageFilter.MedianFilter(size = 13))
-    image = image.convert("L")
-    image.save(image_path(logo_path, "median_filter"))
-
-    # save final image
-    image.save(image_path(logo_path, "final"))
-    return image
-
-def fill_holes(image_arr):
-    # dimensions of the image
-    height, width = image_arr.shape
-
-    # get the second-lightest color in the image (lightest is white)
-    lightest_color = sorted(np.unique(image_arr))[-2]
-    # if there are holes in the image surrounded by colors, fill them in with white.
-    # [1, 2, 3, 4, 5][1:-1]
-    # drop first and last element
-    for x in range(1, height - 1):
-        row = image_arr[x]
-        # all pixels that are going to be printed are not equal to 0 (no layers)
-        indices = np.where(row != 0)[0]
-
-        # if this row is entirely white,
-        if indices.size < 2 or indices.size == width:
-            continue
-        for y in range(indices[0], indices[-1] + 1):
-            if image_arr[x, y] == 0:
-                image_arr[x, y] = 1
-
-    return image_arr
-
-def transparent_layer(image_arr):
-    height, width = image_arr.shape
-
-    def pixel_to_layer_count(pixel):
-        if pixel != 0:
-            return pixel + transparent_layers
+        if fill_holes:
+            return image.fill_holes()
         else:
-            return pixel
+            return image
 
-    pixel_to_height_vec = np.vectorize(pixel_to_layer_count)
+    def resize(self, scale=3, resample=Image.LANCZOS):
+        """
+        Resize the image to the specified dimensions.
 
-    return pixel_to_height_vec(image_arr)
+        Args:
+            max_width: Target width in pixels
+            max_height: Target height in pixels
+            resample: Resampling filter (default: LANCZOS for high quality)
+                     Options: Image.NEAREST, Image.BOX, Image.BILINEAR,
+                             Image.HAMMING, Image.BICUBIC, Image.LANCZOS
 
-def silhouette(image_arr):
-    height, width = image_arr.shape
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
 
-    def pixel_to_layer_count(pixel):
-        if pixel != 0:
-            return 0
-        else:
-            return 255
+        # Get current dimensions
+        img_width, img_height = self.image.size
+        # Resize the image
+        self.image = self.image.resize((int(img_width * scale), int(img_height * scale)), Image.Resampling.LANCZOS)
 
-    pixel_to_height_vec = np.vectorize(pixel_to_layer_count)
+        self.save("resized")
+        return self
 
-    return pixel_to_height_vec(image_arr)
+    def remove_alpha(self):
+        """
+        Remove the alpha channel from the image if present.
+        If the image has no alpha channel, does nothing.
 
-def image_to_heightmap(image_arr):
-    # the image has grayscale values, so we clamp them.
-    # darkest colors are lowest, brightest is highest.
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
 
-    # dimensions of the image
-    height, width = image_arr.shape
+        # Check if image has alpha channel
+        if self.image.mode in ('RGBA', 'LA', 'PA'):
+            # Create white background and paste image on top
+            new_image = Image.new("RGBA", self.image.size, "WHITE")
+            new_image.paste(self.image, (0, 0), self.image)
+            self.image = new_image.convert('RGB')
 
-    # each pixel will become a point in a three-dimensional
-    # space so the x and y are the x and y in the image,
-    # the Z is computed based off of the brightness of the
-    # pixel
-    # list of points in the 3d space (x, y, z)
-    def pixel_to_layer_count(pixel):
-        layer_interval = 255 / distinct_colors
+        self.save("no_alpha")
+        return self
 
-        # to get the lightest color to have the most layers, invert the value
-        # add 1 for a fully transparent layer at the bottom
-        # this layer must be set explicitly in the slicer.
-        total_layers = (distinct_colors - int(pixel / layer_interval))
-        return total_layers  # return int(layer_count)
+    def grayscale(self):
+        """
+        Convert the image to grayscale.
 
-    pixel_to_height_vec = np.vectorize(pixel_to_layer_count)
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
 
-    return pixel_to_height_vec(image_arr)
+        # Convert to grayscale
+        self.image = self.image.convert("L")
+
+        self.save("grayscale")
+        return self
+
+    def quantize(self, colors=14):
+        """
+        Quantize the image to a limited number of colors.
+
+        Args:
+            colors: Number of colors to quantize to (default: 14)
+
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
+
+        # Quantize the image
+        self.image = self.image.quantize(colors)
+
+        self.save("quantized")
+        return self
+
+    def median_filter(self, size=13):
+        """
+        Apply a median filter to the image to remove details.
+
+        Args:
+            size: Size of the median filter kernel (default: 13)
+
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
+
+        # Convert to RGB if needed (median filter works better with RGB)
+        if self.image.mode != "RGB":
+            self.image = self.image.convert("RGB")
+
+        # Apply median filter
+        self.image = self.image.filter(ImageFilter.MedianFilter(size=size))
+
+        # Convert back to grayscale
+        self.image = self.image.convert("L")
+
+        self.save("median_filter")
+        return self
+
+    def add_border(self, border_width=10, fill='white'):
+        """
+        Add a border to the image.
+
+        Args:
+            border_width: Width of the border in pixels (default: 10)
+            fill: Color to fill the border with (default: 'white')
+
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
+
+        # Add border using ImageOps.expand
+        self.image = ImageOps.expand(self.image, border=border_width, fill=fill)
+
+        self.save("border")
+        return self
+
+    def fill_holes(self):
+        """
+        Fill holes in the image that are surrounded by colors.
+        Converts white pixels (255) that are between colored pixels to the lightest color.
+
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
+
+        # Convert image to numpy array
+        image_arr = np.array(self.image)
+
+        # dimensions of the image
+        height, width = image_arr.shape
+
+        # get the second-lightest color in the image (lightest is white, i.e., 255)
+        lightest_color = sorted(np.unique(image_arr))[-2] if len(np.unique(image_arr)) > 1 else 255
+
+        # if there are holes in the image surrounded by colors, fill them in
+        for x in range(1, height - 1):
+            row = image_arr[x]
+            # all pixels that are going to be printed are not equal to 255 (white)
+            indices = np.where(row != 255)[0]
+
+            # if this row is entirely white or has less than 2 colored pixels, skip it
+            if indices.size < 2 or indices.size == width:
+                continue
+
+            # fill white pixels between first and last colored pixel
+            for y in range(indices[0], indices[-1] + 1):
+                if image_arr[x, y] == 255:
+                    image_arr[x, y] = lightest_color
+
+        # Convert back to PIL Image
+        self.image = Image.fromarray(image_arr)
+
+        self.save("filled")
+        return self
+
+    def create_silhouette(self, border_width=10):
+        """
+        Create a silhouette from the image and save it.
+        White pixels (255) stay white, all colored pixels become black (0).
+        Adds a border around the non-white pixels by dilation.
+        Does not modify the class's image.
+
+        Args:
+            border_width: Width of the border in pixels around the silhouette (default: 10)
+
+        Returns:
+            self (for method chaining)
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
+
+        # Convert image to numpy array
+        image_arr = np.array(self.image)
+
+        # Create silhouette: white stays white (255), everything else becomes black (0)
+        silhouette_arr = np.where(image_arr == 255, 255, 0).astype(np.uint8)
+
+        if border_width > 0:
+            # Create mask of black pixels (non-white pixels)
+            mask = silhouette_arr == 0
+
+            # Manual dilation using sliding window to add border around black pixels
+            padded = np.pad(mask, border_width, mode='constant', constant_values=False)
+            dilated = np.zeros_like(mask)
+
+            for i in range(-border_width, border_width + 1):
+                for j in range(-border_width, border_width + 1):
+                    dilated |= padded[border_width + i: border_width + i + mask.shape[0],
+                               border_width + j: border_width + j + mask.shape[1]]
+
+            # Border is dilated minus original (new pixels around the silhouette)
+            border_mask = dilated & ~mask
+
+            # Set border pixels to black as well
+            silhouette_arr[border_mask] = 0
+
+        # smooth the edges
+        img = Image.fromarray(silhouette_arr)
+        blurred = img.filter(ImageFilter.GaussianBlur(radius=2))
+        smoothed = blurred.point(lambda x: 0 if x > 127 else 255, mode='1')
+
+        image_arr = np.array(smoothed)
+
+        # Convert back: 1 -> 0 (black), 0 -> 255 (white)
+        silhouette_arr = ((1 - image_arr) * 255).astype(np.uint8)
+
+        # Convert back to PIL Image
+        self.image = Image.fromarray(silhouette_arr)
+
+        self.save("silhouette")
+        return self
+
+    def save(self, suffix):
+        """
+        Save the current image to a file with the given suffix.
+        Creates a filename based on the original image path with the suffix appended.
+        Files are saved to the output/ directory.
+
+        Args:
+            suffix: Suffix to append to the filename (e.g., "no_alpha", "grayscale")
+
+        Returns:
+            Path: The path where the image was saved
+        """
+        if self.image is None:
+            raise ValueError("No image loaded")
+
+        if self.image_path is None:
+            raise ValueError("No image path set. Cannot determine where to save the image.")
+
+        # Create the save path in output/ directory
+        filename = pathlib.Path(self.image_path).stem
+        save_filename = f"{filename}_{suffix}.png"
+
+        # Get the base directory (parent of the image's parent directory)
+        # e.g., if image is at "logos/elixir.png", go up to the base and then to "output/"
+        base_dir = pathlib.Path(self.image_path).parent.parent
+        output_dir = base_dir / "output"
+
+        # Create output directory if it doesn't exist
+        output_dir.mkdir(exist_ok=True)
+
+        save_path = output_dir / save_filename
+
+        # Save the image
+        self.image.save(save_path)
+
+        return save_path
 
 
-def heightmap_to_stl(height_arr):
-    # dimensions of the image
-    height, width = height_arr.shape
+class Heightmap:
+    def __init__(self, image_container, distinct_colors=14):
+        """
+        Create a heightmap from an ImageContainer.
 
-    # convert the height array into a list of vertices
-    vertices = []
-    # x = row
-    # y = col
-    for y in range(height):
-        for x in range(width):
-            height_in_layers = height_arr[y][x] * layer_height
-            vertices.append([x, y, height_in_layers])
+        Args:
+            image_container: ImageContainer instance with a processed grayscale image
+            distinct_colors: Number of distinct color layers (default: 14)
+        """
+        if image_container.image is None:
+            raise ValueError("ImageContainer has no image loaded")
 
-    # add vertices for the bottom (now the heightmap is a hollow)
-    for y in range(height):
-        for x in range(width):
-            vertices.append([x, y, 0])
+        self.distinct_colors = distinct_colors
+        self.image_container = image_container
 
-    vertices = np.array(vertices)
-    # create triangles for the mesh
+        # Convert PIL image to numpy array
+        image_arr = np.array(image_container.image)
 
-    # the array look something like this:
-    # (0, 0) - (1, 0) - (2, 0)
-    #   |        |        |
-    # (0, 1) - (1, 1) - (2, 1)
-    #   |        |        |
-    # (0, 2) - (1, 2) - (2, 2)
-    #
-    # point 00 becomes v1
-    # point 10 becomes v2
-    # point 01 becomes v3
-    # the other triangle consists of
-    # 01, 11 and 10.
-    # below we compute the indices of these points as if the array was flat
-    # v1 ---- v2
-    # |    /  |
-    # |   /   |
-    # |  /    |
-    # v3 ---- v4
-    faces = []
-    for y in range(height - 1):
-        for x in range(width - 1):
-            # compute the index in the array as if the 2d array was a long flat array
-            v1 = y * width + x
-            v2 = y * width + (x + 1)
-            v3 = (y + 1) * width + x
-            v4 = (y + 1) * width + (x + 1)
+        # Convert image array to heightmap
+        self.heightmap = self._image_to_heightmap(image_arr)
 
-            # # if the triangle is between all 0 points, discard it
-            # # THIS WILL REMOVE ALL SURFACES EXCEPT THE TOP ONE SO ITS NOT CORRECT YET
-            # if vertices[v1][2] != 0 and vertices[v2][2] != 0 and vertices[v3][2] != 0:
-            faces.append([v1, v2, v3])
-            # if vertices[v2][2] != 0 and vertices[v4][2] != 0 and vertices[v3][2] != 0:
-            faces.append([v2, v4, v3])
+    def debugprint(self):
+        # unique values in the image array
+        unique_colors = sorted(np.unique(self.heightmap))
+        print("unique heights: {}".format([x for x in unique_colors]))
 
-    # these vertices are added after the vertices for the image (so an array of same length added)
-    # | vertices for image | vertices for bottom |
-    offset = width * height
-    for y in range(height - 1):
-        for x in range(width - 1):
-            v1 = offset + y * width + x
-            v2 = offset + y * width + (x + 1)
-            v3 = offset + (y + 1) * width + x
-            v4 = offset + (y + 1) * width + (x + 1)
+    def _image_to_heightmap(self, image_arr):
+        """
+        Convert a grayscale image array to a heightmap.
+        Darker colors = higher height, brighter colors = lower height.
+        White (255) = 0 layers (background)
 
-            faces.append([v1, v2, v3])
-            faces.append([v2, v4, v3])
+        Args:
+            image_arr: Numpy array representing the grayscale image
 
-    for y in range(height - 1):
-        top1 = y * width + 0
-        top2 = (y + 1) * width + 0
-        bot1 = offset + y * width + 0
-        bot2 = offset + (y + 1) * width + 0
+        Returns:
+            Numpy array with height values (layer counts)
+        """
 
-        faces.append([top1, bot1, top2])
-        faces.append([bot1, bot2, top2])
+        def pixel_to_layer_count(pixel):
+            # White pixels (255) should be 0 height (background)
+            # Darker pixels should be taller
+            # Map the pixel range to layer counts
+            if pixel == 255:
+                return 0
 
-    # Right wall (x = width-1)
-    for y in range(height - 1):
-        top1 = y * width + (width - 1)
-        top2 = (y + 1) * width + (width - 1)
-        bot1 = offset + y * width + (width - 1)
-        bot2 = offset + (y + 1) * width + (width - 1)
+            # For non-white pixels, map to 1..distinct_colors layers
+            # Darker pixels get more layers
+            layer_interval = 255 / self.distinct_colors
 
-        faces.append([top1, top2, bot1])
-        faces.append([bot1, top2, bot2])
+            # Invert: darker (lower values) = more layers
+            total_layers = (self.distinct_colors - int(pixel / layer_interval))
 
-    # Front wall (y = 0)
-    for x in range(width - 1):
-        top1 = 0 * width + x
-        top2 = 0 * width + (x + 1)
-        bot1 = offset + 0 * width + x
-        bot2 = offset + 0 * width + (x + 1)
+            # Ensure at least 1 layer for non-white pixels
+            return max(1, total_layers)
 
-        faces.append([top1, top2, bot1])
-        faces.append([bot1, top2, bot2])
+        # Vectorize the function for efficient array processing
+        pixel_to_height_vec = np.vectorize(pixel_to_layer_count)
 
-    # Back wall (y = height-1)
-    for x in range(width - 1):
-        top1 = (height - 1) * width + x
-        top2 = (height - 1) * width + (x + 1)
-        bot1 = offset + (height - 1) * width + x
-        bot2 = offset + (height - 1) * width + (x + 1)
+        return pixel_to_height_vec(image_arr)
 
-        faces.append([top1, bot1, top2])
-        faces.append([bot1, bot2, top2])
+    def add_transparent_layers(self, transparent_layers=1, color_pixels_only=False):
+        """
+        Add transparent layers to the heightmap.
 
-    faces = np.array(faces)
+        Args:
+            transparent_layers: Number of transparent layers to add (default: 5)
+            color_pixels_only: If True, only add transparent layers to non-zero pixels (default: False)
 
-    # Create mesh object
-    stl_mesh = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
-    for i, face in enumerate(faces):
-        for j in range(3):
-            stl_mesh.vectors[i][j] = vertices[face[j], :]
+        Returns:
+            self (for method chaining)
+        """
 
-    return stl_mesh
+        def pixel_to_layer_count(pixel):
+            if pixel != 0 or not color_pixels_only:
+                return pixel + transparent_layers
+            else:
+                return pixel
+
+        # Vectorize the function for efficient array processing
+        pixel_to_height_vec = np.vectorize(pixel_to_layer_count)
+
+        # Update the heightmap
+        self.heightmap = pixel_to_height_vec(self.heightmap)
+
+        return self
+
+    def add_border(self, border_thickness=10, border_value=5):
+        """
+        Add a border of specified height around the heightmap.
+        This uses dilation to expand the logo and adds a border around it.
+
+        Args:
+            border_thickness: Width of the border in pixels (default: 10)
+            border_value: Height value for the border pixels (default: 5, typically transparent_layers)
+
+        Returns:
+            self (for method chaining)
+        """
+        result = self.heightmap.copy()
+
+        # 0 means no height, so all non-0 values are a pixel
+        mask = self.heightmap > 0
+
+        # Manual dilation using sliding window
+        padded = np.pad(mask, border_thickness, mode='constant', constant_values=False)
+        dilated = np.zeros_like(mask)
+
+        for i in range(-border_thickness, border_thickness + 1):
+            for j in range(-border_thickness, border_thickness + 1):
+                dilated |= padded[border_thickness + i: border_thickness + i + mask.shape[0],
+                           border_thickness + j: border_thickness + j + mask.shape[1]]
+
+        # Border is dilated minus original
+        border_mask = dilated & ~mask
+        result[border_mask] = border_value
+
+        self.heightmap = result
+        return self
+
+    def smooth(self, sigma=1.0, edge_width=3):
+        """
+        Smooth only the outer edges of the heightmap to reduce jagged edges.
+        Uses Gaussian blur only on pixels near the boundary.
+
+        Args:
+            sigma: Standard deviation for Gaussian kernel (default: 1.0)
+                   Higher values = more smoothing
+            edge_width: Width of edge region to smooth in pixels (default: 3)
+
+        Returns:
+            self (for method chaining)
+        """
+        from scipy.ndimage import gaussian_filter, binary_erosion
+
+        # Create mask of non-zero pixels
+        mask = self.heightmap > 0
+
+        # Erode the mask to find interior pixels
+        # Pixels that remain after erosion are interior (not edges)
+        struct = np.ones((edge_width * 2 + 1, edge_width * 2 + 1))
+        interior = binary_erosion(mask, structure=struct)
+
+        # Edge pixels are non-zero pixels that are NOT interior
+        edge_mask = mask & ~interior
+
+        # Apply Gaussian smoothing to entire heightmap
+        smoothed = gaussian_filter(self.heightmap, sigma=sigma)
+
+        # Only apply smoothing to edge pixels
+        # Interior pixels keep original values, edges get smoothed
+        self.heightmap = np.where(edge_mask, smoothed, self.heightmap)
+
+        return self
+
+    def scale_to_layer_height(self, layer_height=0.1):
+        """
+        Scale the heightmap values by the layer height.
+        Converts layer counts to actual physical heights in mm as floats.
+
+        Args:
+            layer_height: Height of each layer in mm (default: 0.1)
+
+        Returns:
+            self (for method chaining)
+        """
+        self.heightmap = self.heightmap.astype(np.float64) * layer_height
+        return self
+
+    def to_stl(self, output_file='output.stl', scale_xy=1.0, scale_z=1.0):
+        """
+        Convert a 2D array of heights into an STL file.
+
+        Parameters:
+        - height_array: 2D numpy array where each value is the height
+        - output_file: name of the output STL file
+        - scale_xy: scaling factor for x and y dimensions
+        - scale_z: scaling factor for z (height) dimension
+        """
+        height_array = self.heightmap
+        rows, cols = height_array.shape
+
+        # Create vertices for the top surface
+        vertices = []
+        faces = []
+
+        # Generate vertices for each point in the grid
+        for i in range(rows):
+            for j in range(cols):
+                x = j * scale_xy
+                y = i * scale_xy
+                z = height_array[i, j] * scale_z
+                vertices.append([x, y, z])
+
+        # Generate triangular faces for the top surface
+        # Each grid cell creates 2 triangles
+        # Skip cells where all corners have zero height
+        for i in range(rows - 1):
+            for j in range(cols - 1):
+                # Get heights of the 4 corners
+                h1 = height_array[i, j]
+                h2 = height_array[i, j + 1]
+                h3 = height_array[i + 1, j]
+                h4 = height_array[i + 1, j + 1]
+
+                # Skip if all corners are at zero height
+                if max(h1, h2, h3, h4) < 0.001:
+                    continue
+
+                # Indices of the 4 corners of current cell
+                v1 = i * cols + j
+                v2 = i * cols + (j + 1)
+                v3 = (i + 1) * cols + j
+                v4 = (i + 1) * cols + (j + 1)
+
+                # Two triangles per cell
+                faces.append([v1, v2, v4])
+                faces.append([v1, v4, v3])
+
+        # Add bottom face (flat at z=0)
+        for i in range(rows):
+            for j in range(cols):
+                x = j * scale_xy
+                y = i * scale_xy
+                vertices.append([x, y, 0])
+
+        # Bottom faces
+        # Skip cells where all corners have zero height
+        offset = rows * cols
+        for i in range(rows - 1):
+            for j in range(cols - 1):
+                # Get heights of the 4 corners
+                h1 = height_array[i, j]
+                h2 = height_array[i, j + 1]
+                h3 = height_array[i + 1, j]
+                h4 = height_array[i + 1, j + 1]
+
+                # Skip if all corners are at zero height
+                if max(h1, h2, h3, h4) < 0.001:
+                    continue
+
+                v1 = offset + i * cols + j
+                v2 = offset + i * cols + (j + 1)
+                v3 = offset + (i + 1) * cols + j
+                v4 = offset + (i + 1) * cols + (j + 1)
+
+                # Reverse winding order for bottom
+                faces.append([v1, v4, v2])
+                faces.append([v1, v3, v4])
+
+        # Add side walls
+        # Only add walls where at least one vertex has non-zero height
+        # Left edge
+        for i in range(rows - 1):
+            h1 = height_array[i, 0]
+            h2 = height_array[i + 1, 0]
+            if max(h1, h2) < 0.001:
+                continue
+
+            top1 = i * cols
+            top2 = (i + 1) * cols
+            bot1 = offset + i * cols
+            bot2 = offset + (i + 1) * cols
+            faces.append([top1, bot1, top2])
+            faces.append([top2, bot1, bot2])
+
+        # Right edge
+        for i in range(rows - 1):
+            h1 = height_array[i, cols - 1]
+            h2 = height_array[i + 1, cols - 1]
+            if max(h1, h2) < 0.001:
+                continue
+
+            top1 = i * cols + (cols - 1)
+            top2 = (i + 1) * cols + (cols - 1)
+            bot1 = offset + i * cols + (cols - 1)
+            bot2 = offset + (i + 1) * cols + (cols - 1)
+            faces.append([top1, top2, bot1])
+            faces.append([top2, bot2, bot1])
+
+        # Front edge
+        for j in range(cols - 1):
+            h1 = height_array[0, j]
+            h2 = height_array[0, j + 1]
+            if max(h1, h2) < 0.001:
+                continue
+
+            top1 = j
+            top2 = j + 1
+            bot1 = offset + j
+            bot2 = offset + j + 1
+            faces.append([top1, top2, bot1])
+            faces.append([top2, bot2, bot1])
+
+        # Back edge
+        for j in range(cols - 1):
+            h1 = height_array[rows - 1, j]
+            h2 = height_array[rows - 1, j + 1]
+            if max(h1, h2) < 0.001:
+                continue
+
+            top1 = (rows - 1) * cols + j
+            top2 = (rows - 1) * cols + j + 1
+            bot1 = offset + (rows - 1) * cols + j
+            bot2 = offset + (rows - 1) * cols + j + 1
+            faces.append([top1, bot1, top2])
+            faces.append([top2, bot1, bot2])
+
+        # Create the mesh
+        vertices = np.array(vertices)
+        faces = np.array(faces)
+
+        # Create mesh object
+        surface_mesh = mesh.Mesh(np.zeros(faces.shape[0], dtype=mesh.Mesh.dtype))
+        for i, face in enumerate(faces):
+            for j in range(3):
+                surface_mesh.vectors[i][j] = vertices[face[j]]
+
+        # Write to file
+        surface_mesh.save(output_file)
+        print(f"STL file saved as {output_file}")
 
 
-def remove_zero_height(stl_mesh, base_height=0):
-    """Remove faces that are at or below base_height"""
-    valid_faces = []
+def scale_stl(file, scale=0.2):
+    """
+    Scale the STL file with a given factor.
+    """
+    model = openstl.read(file)  # np.array of shape (N,4,3) -> normal, v0,v1,v2
+    model[:, 1:4, 0] *= scale  # Scale X coordinates
+    model[:, 1:4, 1] *= scale  # Scale Y coordinates
+    openstl.write(file, model, openstl.format.binary)
 
-    for i, triangle in enumerate(stl_mesh.vectors):
-        max_z = np.max(triangle[:, 2])  # Z coordinates
+openstl.set_activate_overflow_safety(False)
 
-        if max_z > base_height + 0.01:  # Small tolerance
-            valid_faces.append(i)
+# these parameters are for the elixir logo
+# process_factor = 1.5 * 1
+# stl_scaledown = 0.19 / 1
+# layer_height=0.1
+# transparent_layers = False
+# colors = 20
+# silhouette = True
+# fill_holes = True
 
-    # Create new mesh with only valid faces
-    if len(valid_faces) > 0:
-        new_vectors = stl_mesh.vectors[valid_faces]
-        new_mesh = mesh.Mesh(np.zeros(len(new_vectors), dtype=mesh.Mesh.dtype))
-        new_mesh.vectors = new_vectors
-        return new_mesh
-    else:
-        return None
-
-def save_stl_mesh(stl_mesh, stl_path):
-    # Save to file
-    stl_mesh.save(stl_path)
+# the erlang logo doesn't need scaling since it's much simpler.
+process_factor = 1
+stl_scaledown = 0.1
+layer_height=0.1
+transparent_layers = True
+colors = 2
+silhouette =  False
+fill_holes = False
 
 
-def debugprint(height_arr):
-    layer_heights = np.unique(height_arr)
-    minimal_layer_height = np.min(layer_heights)
-    maximal_layer_height = np.max(layer_heights)
-    expected_height = maximal_layer_height * layer_height
-    print("""
-    Lowest layer   : {}
-    Highest layer  : {}
-    Layers         : {}
-    Layer height   : {}
-    Expected height: {}
-    """.format(minimal_layer_height, maximal_layer_height, layer_heights, layer_height, expected_height))
+# Read in the image and do some processing.
+# This involves removing the background alpha, quantizing, resizing, etc.
+image = ImageContainer.from_image("logos/erlang.png")
+image = image.process_logo(scale=process_factor, colors=colors, median_size=13, border_width=15, fill_holes=fill_holes)
 
-logo = "logos/elixir.png"
-image = process_logo(logo)
-image_arr = np.array(image)
+# Create the stl for the colored layers of the logo.
+# This has to be put onto a silhouette model. Generated below.
+heightmap = Heightmap(image)
+heightmap = heightmap.scale_to_layer_height(layer_height=layer_height)
 
-height_arr = image_to_heightmap(image_arr)
-height_arr = fill_holes(height_arr)
-height_arr = transparent_layer(height_arr)
-debugprint(height_arr)
-stl_mesh = heightmap_to_stl(height_arr)
-save_stl_mesh(stl_mesh, stl_path(logo))
+# for the erlang logo we can add the transparent layer immediately.
+if transparent_layers:
+    heightmap = heightmap.add_transparent_layers(color_pixels_only=False)
+
+heightmap.to_stl("output/erlang.stl")
+scale_stl("output/erlang.stl", scale=stl_scaledown)
+
+if silhouette:
+    # Create the silhouette of the logo to put the colored layer on top of.
+    image = image.create_silhouette(border_width=0).median_filter(size=13).create_silhouette(border_width=10)
+    heightmap = Heightmap(image)
+    heightmap = heightmap.scale_to_layer_height(layer_height=layer_height)
+    heightmap.to_stl("output/erlang_silhouette.stl")
+    scale_stl("output/erlang_silhouette.stl", scale=stl_scaledown)

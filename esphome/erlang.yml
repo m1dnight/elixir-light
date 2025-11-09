@@ -1,5 +1,5 @@
 esphome:
-  name: elixir
+  name: erlang
 
 esp32:
   board: esp32dev

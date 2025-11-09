@@ -1,6 +1,14 @@
-numpy==2.2.6
+cairocffi==1.7.1
+CairoSVG==2.8.2
+cffi==2.0.0
+cssselect2==0.8.0
+defusedxml==0.7.1
+numpy==2.0.2
 numpy-stl==3.2.0
 pillow==11.3.0
+pycparser==2.23
 pymesh==1.0.2
 python-utils==3.9.1
+tinycss2==1.4.0
 typing_extensions==4.15.0
+webencodings==0.5.1
