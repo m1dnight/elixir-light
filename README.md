@@ -121,6 +121,10 @@ I have put in an ESP32 and flashed it with the esphome firmware you can find
 under `esphome`. Note that this Esp Home file assumes that red, green, blue, and
 white LEDs are all connected to separate pins.
 
+If you would rather skip ESPHome and Home Assistant, `firmware/` holds a tiny
+[AtomVM](https://www.atomvm.net) app that simply turns all the LEDs on.
+See `atomvm/README.md`.
+
 ## The Electronics
 
 The electronics are repurposed PCBs I had lying around. They're circular PCBs

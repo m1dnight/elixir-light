@@ -1,0 +1,5 @@
+/_build/
+/deps/
+*.avm
+erl_crash.dump
+/firmware_images/
