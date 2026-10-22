@@ -64,6 +64,29 @@ those. This made the print path less than perfect. In reality you don't notice
 them.
 
 
+## Generating Simple Logos
+
+For simpler logos, like the Erlang and Nerves logo, the process is a bit
+simpler.
+
+For the Nerves logo, I started out with the SVG files, so I could generate a
+high resolution PNG file.
+
+```bash
+cairosvg "logo/logos/nerves_stacked.svg" -o logo/logos/nerves_stacked.png --output-width 2000
+```
+
+Then, in the `scripts/main.py` file, replace the filename on line 670 with the
+name of the logo you wish to convert.
+
+```bash
+python scripts/main.py
+```
+
+You should end up with an `.stl` file named the same under `logo/output/`.
+
+
+
 ## Programming
 
 I have put in an ESP32 and flashed it with the esphome firmware you can find
