@@ -657,27 +657,29 @@ def scale_stl(file, scale=0.2):
 openstl.set_activate_overflow_safety(False)
 
 # these parameters are for the elixir logo
-# process_factor = 1.5 * 1
-# stl_scaledown = 0.19 / 1
-# layer_height=0.1
-# transparent_layers = False
-# colors = 20
-# silhouette = True
-# fill_holes = True
+logo = "elixir"
+process_factor = 1.5 * 1
+stl_scaledown = 0.19 / 1
+layer_height=0.1
+transparent_layers = False
+colors = 20
+silhouette = True
+fill_holes = True
 
 # the erlang logo doesn't need scaling since it's much simpler.
-process_factor = 1
-stl_scaledown = 0.1
-layer_height=0.1
-transparent_layers = True
-colors = 2
-silhouette =  False
-fill_holes = False
+# logo = "erlang"
+# process_factor = 1
+# stl_scaledown = 0.1
+# layer_height=0.1
+# transparent_layers = True
+# colors = 2
+# silhouette =  False
+# fill_holes = False
 
 
 # Read in the image and do some processing.
 # This involves removing the background alpha, quantizing, resizing, etc.
-image = ImageContainer.from_image("logos/erlang.png")
+image = ImageContainer.from_image(f"logos/{logo}.png")
 image = image.process_logo(scale=process_factor, colors=colors, median_size=13, border_width=15, fill_holes=fill_holes)
 
 # Create the stl for the colored layers of the logo.
@@ -689,13 +691,13 @@ heightmap = heightmap.scale_to_layer_height(layer_height=layer_height)
 if transparent_layers:
     heightmap = heightmap.add_transparent_layers(color_pixels_only=False)
 
-heightmap.to_stl("output/erlang.stl")
-scale_stl("output/erlang.stl", scale=stl_scaledown)
+heightmap.to_stl(f"output/{logo}.stl")
+scale_stl(f"output/{logo}.stl", scale=stl_scaledown)
 
 if silhouette:
     # Create the silhouette of the logo to put the colored layer on top of.
     image = image.create_silhouette(border_width=0).median_filter(size=13).create_silhouette(border_width=10)
     heightmap = Heightmap(image)
     heightmap = heightmap.scale_to_layer_height(layer_height=layer_height)
-    heightmap.to_stl("output/erlang_silhouette.stl")
-    scale_stl("output/erlang_silhouette.stl", scale=stl_scaledown)
+    heightmap.to_stl(f"output/{logo}_silhouette.stl")
+    scale_stl(f"output/{logo}_silhouette.stl", scale=stl_scaledown)
