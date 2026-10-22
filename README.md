@@ -85,7 +85,8 @@ python scripts/main.py
 
 You should end up with an `.stl` file named the same under `logo/output/`.
 
-
+I have not made enclosures for anything besides the Erlang and Elixir logo yet.
+Feel free to do so and create a PR.
 
 ## Programming
 
